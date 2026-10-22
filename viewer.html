@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Ray Tracer PPM Viewer</title>
+  <style>
+    :root {
+      --bg: #0f1117;
+      --card-bg: #1a1d27;
+      --accent: #3b82f6;
+      --accent-hover: #2563eb;
+      --text: #f3f4f6;
+      --text-muted: #9ca3af;
+      --border: #2e3446;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+    body {
+      background-color: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 24px;
+    }
+    header {
+      text-align: center;
+      margin-bottom: 24px;
+    }
+    h1 {
+      font-size: 1.8rem;
+      margin-bottom: 8px;
+      color: #fff;
+    }
+    p.subtitle {
+      color: var(--text-muted);
+      font-size: 0.95rem;
+    }
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-bottom: 20px;
+      background: var(--card-bg);
+      padding: 16px 20px;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      align-items: center;
+      justify-content: center;
+    }
+    .btn {
+      background: var(--accent);
+      color: white;
+      border: none;
+      padding: 9px 18px;
+      border-radius: 8px;
+      font-size: 0.9rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.15s ease;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .btn:hover { background: var(--accent-hover); }
+    .btn-secondary {
+      background: #2b3144;
+      color: #e5e7eb;
+    }
+    .btn-secondary:hover { background: #374151; }
+    input[type="file"] { display: none; }
+    .file-label {
+      cursor: pointer;
+    }
+    .canvas-container {
+      background: #000;
+      padding: 8px;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      box-shadow: 0 12px 32px rgba(0,0,0,0.5);
+      max-width: 100%;
+      overflow: auto;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+    canvas {
+      border-radius: 6px;
+      max-width: 100%;
+      height: auto;
+      display: block;
+    }
+    .meta {
+      margin-top: 12px;
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      display: flex;
+      gap: 20px;
+    }
+    .drop-zone {
+      border: 2px dashed var(--border);
+      padding: 40px;
+      border-radius: 12px;
+      text-align: center;
+      color: var(--text-muted);
+      cursor: pointer;
+      width: 100%;
+      max-width: 800px;
+      margin-bottom: 20px;
+    }
+    .drop-zone.dragover {
+      border-color: var(--accent);
+      background: rgba(59, 130, 246, 0.05);
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Ray Tracer PPM Viewer</h1>
+    <p class="subtitle">Drag & drop or select any rendered .ppm file to view and export as PNG</p>
+  </header>
+
+  <div class="controls">
+    <label class="btn file-label">
+      📁 Choose .ppm File
+      <input type="file" id="fileInput" accept=".ppm">
+    </label>
+    <button class="btn btn-secondary" onclick="loadSample('scene1.ppm')">Scene 1 (Sphere)</button>
+    <button class="btn btn-secondary" onclick="loadSample('scene2.ppm')">Scene 2 (Cube/Plane)</button>
+    <button class="btn btn-secondary" onclick="loadSample('scene3.ppm')">Scene 3 (All 4 Objects)</button>
+    <button class="btn btn-secondary" onclick="loadSample('scene4.ppm')">Scene 4 (Perspective)</button>
+    <button class="btn btn-secondary" onclick="loadSample('bonus_scene3.ppm')">Bonus Scene 3</button>
+    <button class="btn" id="exportBtn" style="display:none;" onclick="exportPng()">💾 Save PNG</button>
+  </div>
+
+  <div class="drop-zone" id="dropZone">
+    <p>Drag and drop a <strong>.ppm</strong> file here, or use the buttons above.</p>
+  </div>
+
+  <div class="canvas-container" id="canvasCard" style="display: none;">
+    <canvas id="ppmCanvas"></canvas>
+    <div class="meta">
+      <span id="infoDimensions">Dimensions: -</span>
+      <span id="infoPixels">Pixels: -</span>
+      <span id="infoName">File: -</span>
+    </div>
+  </div>
+
+  <script>
+    const fileInput = document.getElementById('fileInput');
+    const dropZone = document.getElementById('dropZone');
+    const canvas = document.getElementById('ppmCanvas');
+    const ctx = canvas.getContext('2d');
+    const canvasCard = document.getElementById('canvasCard');
+    const exportBtn = document.getElementById('exportBtn');
+    let currentFileName = 'render';
+
+    fileInput.addEventListener('change', (e) => {
+      if (e.target.files.length > 0) {
+        parseFile(e.target.files[0]);
+      }
+    });
+
+    dropZone.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      dropZone.classList.add('dragover');
+    });
+
+    dropZone.addEventListener('dragleave', () => {
+      dropZone.classList.remove('dragover');
+    });
+
+    dropZone.addEventListener('drop', (e) => {
+      e.preventDefault();
+      dropZone.classList.remove('dragover');
+      if (e.dataTransfer.files.length > 0) {
+        parseFile(e.dataTransfer.files[0]);
+      }
+    });
+
+    dropZone.addEventListener('click', () => fileInput.click());
+
+    function loadSample(filename) {
+      currentFileName = filename.replace('.ppm', '');
+      fetch(filename)
+        .then(res => {
+          if (!res.ok) throw new Error('File not accessible via fetch (run a local server or select file with Choose .ppm File)');
+          return res.text();
+        })
+        .then(text => renderPPM(text, filename))
+        .catch(err => {
+          alert(err.message + '\n\nPlease click "Choose .ppm File" to select ' + filename + ' from your folder.');
+        });
+    }
+
+    function parseFile(file) {
+      currentFileName = file.name.replace('.ppm', '');
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        renderPPM(e.target.result, file.name);
+      };
+      reader.readAsText(file);
+    }
+
+    function renderPPM(text, filename) {
+      // Tokenize PPM ignoring comments
+      const tokens = [];
+      const lines = text.split(/\r?\n/);
+      for (let line of lines) {
+        line = line.trim();
+        if (line.startsWith('#') || line.length === 0) continue;
+        const words = line.split(/\s+/);
+        for (let w of words) {
+          if (w.length > 0) tokens.push(w);
+        }
+      }
+
+      if (tokens.length < 4 || tokens[0] !== 'P3') {
+        alert('Invalid PPM P3 file!');
+        return;
+      }
+
+      const width = parseInt(tokens[1], 10);
+      const height = parseInt(tokens[2], 10);
+      const maxVal = parseInt(tokens[3], 10);
+
+      canvas.width = width;
+      canvas.height = height;
+
+      const imgData = ctx.createImageData(width, height);
+      const data = imgData.data;
+
+      let tokenIdx = 4;
+      const numPixels = width * height;
+      const scale = 255 / maxVal;
+
+      for (let i = 0; i < numPixels; i++) {
+        if (tokenIdx + 2 >= tokens.length) break;
+        const r = Math.round(parseInt(tokens[tokenIdx++], 10) * scale);
+        const g = Math.round(parseInt(tokens[tokenIdx++], 10) * scale);
+        const b = Math.round(parseInt(tokens[tokenIdx++], 10) * scale);
+
+        const pIdx = i * 4;
+        data[pIdx] = r;
+        data[pIdx + 1] = g;
+        data[pIdx + 2] = b;
+        data[pIdx + 3] = 255;
+      }
+
+      ctx.putImageData(imgData, 0, 0);
+
+      dropZone.style.display = 'none';
+      canvasCard.style.display = 'flex';
+      exportBtn.style.display = 'inline-flex';
+
+      document.getElementById('infoDimensions').textContent = `Dimensions: ${width} × ${height}`;
+      document.getElementById('infoPixels').textContent = `Pixels: ${(width * height).toLocaleString()}`;
+      document.getElementById('infoName').textContent = `File: ${filename}`;
+    }
+
+    function exportPng() {
+      const link = document.createElement('a');
+      link.download = `${currentFileName}.png`;
+      link.href = canvas.toDataURL('image/png');
+      link.click();
+    }
+  </script>
+</body>
+</html>

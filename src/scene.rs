@@ -13,54 +13,40 @@ pub struct Scene {
     pub brightness: f64,
 }
 
-impl Scene {
-    /// Creates a new empty scene with default lighting.
-    pub fn new() -> Self {
+impl Default for Scene {
+    fn default() -> Self {
         Self {
             objects: Vec::new(),
             lights: Vec::new(),
             ambient: AmbientLight::default_ambient(),
-            background_color: Color::new(0.08, 0.09, 0.12), // Sleek dark ambient background
+            background_color: Color::new(0.08, 0.09, 0.12),
             brightness: 1.0,
         }
     }
+}
 
-    /// Adds a hittable object primitive to the scene.
+impl Scene {
+    pub fn new() -> Self { Self::default() }
+
     pub fn add_object<T: Hittable + 'static>(&mut self, object: T) {
         self.objects.push(Box::new(object));
     }
 
-    /// Adds a point light source to the scene.
-    pub fn add_light(&mut self, light: PointLight) {
-        self.lights.push(light);
-    }
+    pub fn add_light(&mut self, light: PointLight) { self.lights.push(light); }
+    pub fn set_brightness(&mut self, brightness: f64) { self.brightness = brightness.max(0.0); }
+    pub fn set_ambient(&mut self, ambient: AmbientLight) { self.ambient = ambient; }
 
-    /// Adjusts overall scene brightness factor.
-    pub fn set_brightness(&mut self, brightness: f64) {
-        self.brightness = brightness.max(0.0);
-    }
-
-    /// Sets the ambient light of the scene.
-    pub fn set_ambient(&mut self, ambient: AmbientLight) {
-        self.ambient = ambient;
-    }
-
-    /// Tests intersection of a ray with all objects in the scene, returning the closest hit.
-    pub fn hit(&self, ray: &Ray, t_min: f64, t_max: f64) -> Option<HitRecord> {
-        let mut closest_rec: Option<HitRecord> = None;
-        let mut closest_so_far = t_max;
-
-        for object in &self.objects {
-            if let Some(rec) = object.hit(ray, t_min, closest_so_far) {
-                closest_so_far = rec.t;
-                closest_rec = Some(rec);
+    pub fn hit(&self, ray: &Ray, t_min: f64, mut t_max: f64) -> Option<HitRecord> {
+        let mut closest = None;
+        for obj in &self.objects {
+            if let Some(rec) = obj.hit(ray, t_min, t_max) {
+                t_max = rec.t;
+                closest = Some(rec);
             }
         }
-
-        closest_rec
+        closest
     }
 
-    /// Recursively traces a ray into the scene to calculate pixel color.
     pub fn trace_ray(
         &self,
         ray: &Ray,
@@ -74,112 +60,61 @@ impl Scene {
             return Color::BLACK;
         }
 
-        let hit = self.hit(ray, 1e-4, f64::INFINITY);
-        let rec = match hit {
+        let rec = match self.hit(ray, 1e-4, f64::INFINITY) {
             Some(r) => r,
             None => return self.background_color * self.brightness,
         };
 
-        // Determine surface base albedo
-        let base_color = if enable_textures {
-            rec.material.surface_color(rec.uv, rec.point)
-        } else {
-            match &rec.material.texture {
-                Texture::Solid(c) => *c,
-                Texture::Checkerboard { color1, .. } => *color1,
-            }
+        let base_color = match (&rec.material.texture, enable_textures) {
+            (Texture::Solid(c), _) => *c,
+            (Texture::Checkerboard { color1, .. }, false) => *color1,
+            _ => rec.material.surface_color(rec.uv, rec.point),
         };
 
-        // Ambient illumination component
-        let mut final_color = base_color * self.ambient.color * (self.ambient.intensity * self.brightness);
-
+        // Ambient component
+        let mut color = base_color * self.ambient.color * (self.ambient.intensity * self.brightness);
         let view_dir = (-ray.direction).normalize();
 
-        // Direct lighting and shadows from each point light
+        // Direct lighting and shadows
         for light in &self.lights {
-            let light_vec = light.position - rec.point;
-            let light_dist = light_vec.length();
-            let light_dir = light_vec.normalize();
+            let l_vec = light.position - rec.point;
+            let l_dist = l_vec.length();
+            let l_dir = l_vec.normalize();
 
-            // Shadow ray check: offset from surface to avoid self-shadowing acne
-            let shadow_ray = Ray::new(rec.point + rec.normal * 1e-4, light_dir);
-            let in_shadow = self.hit(&shadow_ray, 1e-4, light_dist - 1e-4).is_some();
-
-            if !in_shadow {
-                // Diffuse (Lambertian) reflection
-                let n_dot_l = rec.normal.dot(light_dir).max(0.0);
+            let shadow_ray = Ray::new(rec.point + rec.normal * 1e-4, l_dir);
+            if self.hit(&shadow_ray, 1e-4, l_dist - 1e-4).is_none() {
+                let n_dot_l = rec.normal.dot(l_dir).max(0.0);
                 let diffuse = base_color * light.color * (n_dot_l * light.intensity * self.brightness);
 
-                // Specular (Blinn-Phong) highlight
-                let halfway = (light_dir + view_dir).normalize();
-                let n_dot_h = rec.normal.dot(halfway).max(0.0);
-                let spec_factor = n_dot_h.powf(rec.material.specular_exponent)
+                let halfway = (l_dir + view_dir).normalize();
+                let spec = rec.normal.dot(halfway).max(0.0).powf(rec.material.specular_exponent)
                     * rec.material.specular_intensity
                     * light.intensity
                     * self.brightness;
-                let specular = light.color * spec_factor;
 
-                final_color += diffuse + specular;
+                color += diffuse + light.color * spec;
             }
         }
 
-        // Bonus: Specular reflection
+        // Reflection
         if enable_reflection && rec.material.reflectivity > 0.0 {
-            let reflect_dir = ray.direction.reflect(rec.normal).normalize();
-            let reflect_ray = Ray::new(rec.point + rec.normal * 1e-4, reflect_dir);
-            let reflected_color = self.trace_ray(
-                &reflect_ray,
-                depth + 1,
-                max_depth,
-                enable_textures,
-                enable_reflection,
-                enable_refraction,
-            );
-            final_color = Color::new(
-                final_color.r * (1.0 - rec.material.reflectivity)
-                    + reflected_color.r * rec.material.reflectivity,
-                final_color.g * (1.0 - rec.material.reflectivity)
-                    + reflected_color.g * rec.material.reflectivity,
-                final_color.b * (1.0 - rec.material.reflectivity)
-                    + reflected_color.b * rec.material.reflectivity,
-            );
+            let refl_ray = Ray::new(rec.point + rec.normal * 1e-4, ray.direction.reflect(rec.normal).normalize());
+            let refl_col = self.trace_ray(&refl_ray, depth + 1, max_depth, enable_textures, true, enable_refraction);
+            let k = rec.material.reflectivity;
+            color = color * (1.0 - k) + refl_col * k;
         }
 
-        // Bonus: Refraction
+        // Refraction
         if enable_refraction && rec.material.refractivity > 0.0 {
-            let refraction_ratio = if rec.front_face {
-                1.0 / rec.material.index_of_refraction
-            } else {
-                rec.material.index_of_refraction
-            };
-
-            if let Some(refract_dir) = ray.direction.refract(rec.normal, refraction_ratio) {
-                let refract_ray = Ray::new(rec.point - rec.normal * 1e-4, refract_dir.normalize());
-                let refracted_color = self.trace_ray(
-                    &refract_ray,
-                    depth + 1,
-                    max_depth,
-                    enable_textures,
-                    enable_reflection,
-                    enable_refraction,
-                );
-                final_color = Color::new(
-                    final_color.r * (1.0 - rec.material.refractivity)
-                        + refracted_color.r * rec.material.refractivity,
-                    final_color.g * (1.0 - rec.material.refractivity)
-                        + refracted_color.g * rec.material.refractivity,
-                    final_color.b * (1.0 - rec.material.refractivity)
-                        + refracted_color.b * rec.material.refractivity,
-                );
+            let eta = if rec.front_face { 1.0 / rec.material.index_of_refraction } else { rec.material.index_of_refraction };
+            if let Some(r_dir) = ray.direction.refract(rec.normal, eta) {
+                let refr_ray = Ray::new(rec.point - rec.normal * 1e-4, r_dir.normalize());
+                let refr_col = self.trace_ray(&refr_ray, depth + 1, max_depth, enable_textures, enable_reflection, true);
+                let k = rec.material.refractivity;
+                color = color * (1.0 - k) + refr_col * k;
             }
         }
 
-        final_color
-    }
-}
-
-impl Default for Scene {
-    fn default() -> Self {
-        Self::new()
+        color
     }
 }

@@ -19,10 +19,6 @@ pub struct RenderConfig {
 
 impl Default for RenderConfig {
     fn default() -> Self {
-        let detected_threads = thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4);
-
         Self {
             width: 800,
             height: 600,
@@ -30,7 +26,7 @@ impl Default for RenderConfig {
             enable_textures: false,
             enable_reflection: false,
             enable_refraction: false,
-            num_threads: detected_threads,
+            num_threads: thread::available_parallelism().map_or(4, |n| n.get()),
         }
     }
 }
@@ -46,30 +42,22 @@ impl Renderer {
 
     /// Renders the scene with the specified camera and returns the full 2D pixel grid.
     pub fn render_pixels(&self, scene: &Scene, camera: &Camera) -> Vec<Color> {
-        let width = self.config.width;
-        let height = self.config.height;
-        let num_threads = self.config.num_threads.max(1).min(height as usize);
-        let rows_per_thread = (height as usize + num_threads - 1) / num_threads;
-
-        let mut all_pixels = vec![Color::BLACK; (width * height) as usize];
+        let (w, h) = (self.config.width, self.config.height);
+        let n_threads = self.config.num_threads.max(1).min(h as usize);
+        let rows_per_chunk = (h as usize + n_threads - 1) / n_threads;
+        let chunk_size = rows_per_chunk * w as usize;
+        let mut pixels = vec![Color::BLACK; (w * h) as usize];
 
         thread::scope(|s| {
-            let mut handles = Vec::with_capacity(num_threads);
-
-            for thread_idx in 0..num_threads {
-                let start_y = (thread_idx * rows_per_thread) as u32;
-                let end_y = ((thread_idx + 1) * rows_per_thread).min(height as usize) as u32;
-
-                if start_y >= height {
-                    break;
-                }
-
-                handles.push(s.spawn(move || {
-                    let mut thread_pixels = Vec::with_capacity(((end_y - start_y) * width) as usize);
-                    for y in start_y..end_y {
-                        for x in 0..width {
-                            let ray = camera.get_pixel_ray(x, y, width, height);
-                            let color = scene.trace_ray(
+            for (idx, chunk) in pixels.chunks_mut(chunk_size).enumerate() {
+                let start_y = (idx * rows_per_chunk) as u32;
+                s.spawn(move || {
+                    for (i, px) in chunk.iter_mut().enumerate() {
+                        let x = (i % w as usize) as u32;
+                        let y = start_y + (i / w as usize) as u32;
+                        if y < h {
+                            let ray = camera.get_pixel_ray(x, y, w, h);
+                            *px = scene.trace_ray(
                                 &ray,
                                 0,
                                 self.config.max_depth,
@@ -77,21 +65,13 @@ impl Renderer {
                                 self.config.enable_reflection,
                                 self.config.enable_refraction,
                             );
-                            thread_pixels.push(color);
                         }
                     }
-                    (start_y, thread_pixels)
-                }));
-            }
-
-            for handle in handles {
-                let (start_y, thread_pixels) = handle.join().expect("Worker thread panicked during render");
-                let offset = (start_y * width) as usize;
-                all_pixels[offset..offset + thread_pixels.len()].copy_from_slice(&thread_pixels);
+                });
             }
         });
 
-        all_pixels
+        pixels
     }
 
     /// Renders the scene directly into a standard PPM P3 writer.
@@ -101,21 +81,12 @@ impl Renderer {
         camera: &Camera,
         writer: &mut W,
     ) -> std::io::Result<()> {
-        let pixels = self.render_pixels(scene, camera);
-
-        // Write PPM P3 Header
-        writeln!(writer, "P3")?;
-        writeln!(writer, "{} {}", self.config.width, self.config.height)?;
-        writeln!(writer, "255")?;
-
-        // Write pixel RGB triplets (one pixel per line)
-        for color in pixels {
-            let (r, g, b) = color.to_rgb_clamped();
-            writeln!(writer, "{} {} {}", r, g, b)?;
+        writeln!(writer, "P3\n{} {}\n255", self.config.width, self.config.height)?;
+        for c in self.render_pixels(scene, camera) {
+            let (r, g, b) = c.to_rgb_clamped();
+            writeln!(writer, "{r} {g} {b}")?;
         }
-
-        writer.flush()?;
-        Ok(())
+        writer.flush()
     }
 
     /// Renders the scene directly to a file on disk.
@@ -125,16 +96,13 @@ impl Renderer {
         camera: &Camera,
         filepath: &str,
     ) -> std::io::Result<()> {
-        let file = File::create(filepath)?;
-        let mut writer = BufWriter::new(file);
-        self.render_to_writer(scene, camera, &mut writer)
+        self.render_to_writer(scene, camera, &mut BufWriter::new(File::create(filepath)?))
     }
 
     /// Renders the scene to an in-memory PPM string.
     pub fn render_to_string(&self, scene: &Scene, camera: &Camera) -> String {
-        let mut buffer = Vec::new();
-        self.render_to_writer(scene, camera, &mut buffer)
-            .expect("Writing to in-memory buffer failed");
-        String::from_utf8(buffer).expect("Rendered PPM was not valid UTF-8")
+        let mut buf = Vec::new();
+        self.render_to_writer(scene, camera, &mut buf).expect("render failed");
+        String::from_utf8(buf).expect("invalid utf-8")
     }
 }
